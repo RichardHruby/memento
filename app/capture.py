@@ -4,6 +4,8 @@ import time
 import os
 from langchain_anthropic import ChatAnthropic
 from dotenv import load_dotenv
+from openai import OpenAI
+
 
 from typing import List, Optional, Dict, Any
 
@@ -15,6 +17,10 @@ from dotenv import load_dotenv
 load_dotenv()
 from pymongo import MongoClient
 from bson.objectid import ObjectId
+
+from streamlit_mic_recorder import mic_recorder
+
+import io
 
 
 MONGODB_ATLAS_CLUSTER_URI = os.getenv("MONGODB_URI")
@@ -71,7 +77,66 @@ def upload_conversation(conversation_dict: Dict[str, Any]) -> None:
 
 chat = ChatAnthropic(temperature=0, model_name="claude-3-opus-20240229")
 
+
+def record_audio():
+    st.subheader("Audio Recording")
+    audio = mic_recorder(
+        start_prompt="Start recording",
+        stop_prompt="Stop recording",
+        just_once=True,
+        use_container_width=True,
+        format="webm",
+        key="audio_recording"
+    )
+    return audio
+
+def transcribe_audio(audio):
+    # Set up OpenAI API client
+    client = OpenAI()
+    try:
+        start_transcription = time.time()
+        audio_bio = io.BytesIO(audio['bytes'])
+        audio_bio.name = 'audio.webm'
+        transcript = client.audio.transcriptions.create(
+            file=audio_bio,
+            model="whisper-1",
+            response_format="verbose_json",
+            timestamp_granularities=["segment"]
+        )
+        end_transcription = time.time()
+        st.info(f"Transcription took {end_transcription - start_transcription} seconds")
+        return transcript
+    except Exception as e:
+        st.error(f"Error during transcription: {str(e)}")
+        return None
+
+def format_transcript(transcript):
+    try:
+        speaker = 0
+        cleaned_text = []
+        for segment in transcript.segments:
+            if speaker == 0:
+                cleaned_text.append(f"Speaker A: {segment['text']}")
+                speaker = 1
+            else:
+                cleaned_text.append(f"Speaker B: {segment['text']}")
+                speaker = 0
+        formatted_text = " \n\n".join(cleaned_text)
+        return formatted_text
+    except Exception as e:
+        st.error(f"Error during transcript formatting: {str(e)}")
+        return ""
+
+
 st.title('Capture social interactions :)')
+
+# Audio recording
+audio = record_audio()
+
+if audio is not None:
+    # Transcribe audio using OpenAI API
+    st.session_state.transcript = transcribe_audio(audio)
+
 
 if st.button("START PROCESSING!"):
     
@@ -80,38 +145,13 @@ if st.button("START PROCESSING!"):
         
         st.write("Running speech to text...")
         
-        time.sleep(1)
-        
+        if st.session_state.transcript is not None:
+            # Display the formatted text
+            formatted_text = format_transcript(st.session_state.transcript)
 
-        transcript = """
-            "Hey man, how\'s it going? Good, good. How about you? '
-            "What's your favorite animal, man? Pretty good. My favorite animal is "
-            "dinosaur. But let me start, like, what's your name? I'm Josh. What's yours? "
-            "I'm Peter, by the way. Nice to meet you. So how do you like the conference? "
-            "It's pretty cool. It's really big. I'm meeting a lot of really cool people. "
-            "My favorite animal is the capybara, so I've been finding a lot of capybara "
-            "lovers around here. It's been nice. Tell me more about capybara. They're "
-            'just really goofy. Interesting. Is that why you like them? Yeah, yeah. '
-            "It's... That's very interesting, man. Like, I've never seen someone who's a "
-            "fan of capybara. It's the first time. Yeah, they're like huge rats, "
-            "basically. Oh, okay. Interesting. They're really cute, and there's been a "
-            'trend going on, going around on, like, Instagram and stuff of reels of '
-            "capybaras doing random stuff. They're like pandas, by the way. That's "
-            'amazing. It kind of reminds me of how, you know, people use animal names '
-            "for, like, technology stuff. Like, you know, I don't want to quite say LLM, "
-            "but, you know, llama is something. Yeah. So, but that's very interesting. "
-            "I'm a huge fan of dinosaur, and one of the popular things is just, I think "
-            "they're very cool. I used to be a very much a fan of a velociraptor, which "
-            'is like, you know, a dinosaur, right? Yeah. What really sparked your '
-            "interest in velociraptors? Was it Jurassic Park? I could, it's partly the "
-            "Jurassic Park, but I would say it's more like the way they behave. Something "
-            "that was very attractive is just like, you know, they're very intelligent. "
-            "They work as a group, and, you know, they're kind of excited, like, it's "
-            "kind of like they're not very big, but they're like super genius, right? "
-            'Yeah. Like the dog, yes, but, all right. I hope you have a good conference, '
-            'man. Yeah, you too, man. I\'ll see you around. See ya."
-        """
-
+            st.write(formatted_text)
+    
+    
         st.write("Detecting conversation...")
         time.sleep(1)
 
@@ -153,7 +193,7 @@ if st.button("START PROCESSING!"):
         runnable = prompt | chat.with_structured_output(schema=Conversation)
 
         st.write("Running extraction...")
-        convo_obj = runnable.invoke({"text": transcript})
+        convo_obj = runnable.invoke({"text": formatted_text})
 
         st.write("Syncing data to MongoDB...")
 
